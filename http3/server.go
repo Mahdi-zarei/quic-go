@@ -544,6 +544,7 @@ func (s *Server) handleRequest(conn quic.Connection, str quic.Stream, decoder *q
 	if s.StreamHijacker != nil {
 		ufh = func(ft FrameType, e error) (processed bool, err error) { return s.StreamHijacker(ft, conn, str, e) }
 	}
+	str = NewSteamWithDeadline(str, StreamTimeout)
 	frame, err := parseNextFrame(str, ufh)
 	if err != nil {
 		if err == errHijacked {
