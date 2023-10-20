@@ -2,6 +2,7 @@ package quic
 
 import (
 	"errors"
+	"sync/atomic"
 
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/internal/utils"
@@ -20,9 +21,10 @@ type frameSorterEntry struct {
 }
 
 type frameSorter struct {
-	queue   map[protocol.ByteCount]frameSorterEntry
-	readPos protocol.ByteCount
-	gapTree *tree.Btree[utils.ByteInterval]
+	queue       map[protocol.ByteCount]frameSorterEntry
+	deleteCount int32
+	readPos     protocol.ByteCount
+	gapTree     *tree.Btree[utils.ByteInterval]
 }
 
 var errDuplicateStreamData = errors.New("duplicate stream data")
@@ -92,6 +94,7 @@ func (s *frameSorter) push(data []byte, offset protocol.ByteCount, doneCb func()
 		if end-pos > oldEntryLen || (hasReplacedAtLeastOne && end-pos == oldEntryLen) {
 			// The existing frame is shorter than the new frame. Replace it.
 			delete(s.queue, pos)
+			s.recreateMapIfNeeded()
 			pos += oldEntryLen
 			hasReplacedAtLeastOne = true
 			if oldEntry.DoneCb != nil {
@@ -195,6 +198,7 @@ func (s *frameSorter) deleteConsecutive(pos protocol.ByteCount) {
 		}
 		oldEntryLen := protocol.ByteCount(len(oldEntry.Data))
 		delete(s.queue, pos)
+		s.recreateMapIfNeeded()
 		if oldEntry.DoneCb != nil {
 			oldEntry.DoneCb()
 		}
@@ -208,6 +212,7 @@ func (s *frameSorter) Pop() (protocol.ByteCount, []byte, func()) {
 		return s.readPos, nil, nil
 	}
 	delete(s.queue, s.readPos)
+	s.recreateMapIfNeeded()
 	offset := s.readPos
 	s.readPos += protocol.ByteCount(len(entry.Data))
 	return offset, entry.Data, entry.DoneCb
@@ -216,4 +221,20 @@ func (s *frameSorter) Pop() (protocol.ByteCount, []byte, func()) {
 // HasMoreData says if there is any more data queued at *any* offset.
 func (s *frameSorter) HasMoreData() bool {
 	return len(s.queue) > 0
+}
+
+func (s *frameSorter) recreateMap() {
+	newMap := make(map[protocol.ByteCount]frameSorterEntry)
+	for key, val := range s.queue {
+		newMap[key] = val
+	}
+	s.queue = newMap
+}
+
+func (s *frameSorter) recreateMapIfNeeded() {
+	currDel := atomic.AddInt32(&s.deleteCount, 1)
+	if currDel >= deleteTrigger {
+		s.recreateMap()
+		atomic.StoreInt32(&s.deleteCount, 0)
+	}
 }

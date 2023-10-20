@@ -2,6 +2,7 @@ package quic
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/quic-go/internal/utils"
 	list "github.com/sagernet/quic-go/internal/utils/linkedlist"
@@ -49,6 +50,7 @@ type lruTokenStore struct {
 	mutex sync.Mutex
 
 	m                map[string]*list.Element[*lruTokenStoreEntry]
+	d                int32
 	q                *list.List[*lruTokenStoreEntry]
 	capacity         int
 	singleOriginSize int
@@ -92,6 +94,7 @@ func (s *lruTokenStore) Put(key string, token *ClientToken) {
 	elem := s.q.Back()
 	entry := elem.Value
 	delete(s.m, entry.key)
+	s.recreateMapIfNeeded()
 	entry.key = key
 	entry.cache = newSingleOriginTokenStore(s.singleOriginSize)
 	entry.cache.Add(token)
@@ -111,7 +114,19 @@ func (s *lruTokenStore) Pop(key string) *ClientToken {
 		if cache.Len() == 0 {
 			s.q.Remove(el)
 			delete(s.m, key)
+			s.recreateMapIfNeeded()
 		}
 	}
 	return token
+}
+
+func (s *lruTokenStore) recreateMapIfNeeded() {
+	if atomic.AddInt32(&s.d, 1) >= deleteTrigger {
+		newMap := make(map[string]*list.Element[*lruTokenStoreEntry])
+		for key, val := range s.m {
+			newMap[key] = val
+		}
+		s.m = newMap
+		atomic.StoreInt32(&s.d, 0)
+	}
 }

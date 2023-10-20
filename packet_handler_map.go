@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sagernet/quic-go/internal/protocol"
@@ -45,9 +46,11 @@ type closePacket struct {
 }
 
 type packetHandlerMap struct {
-	mutex       sync.Mutex
-	handlers    map[protocol.ConnectionID]packetHandler
-	resetTokens map[protocol.StatelessResetToken] /* stateless reset token */ packetHandler
+	mutex         sync.Mutex
+	handlers      map[protocol.ConnectionID]packetHandler
+	hmDeleteCount int32
+	resetTokens   map[protocol.StatelessResetToken] /* stateless reset token */ packetHandler
+	rtDeleteCount int32
 
 	closed    bool
 	closeChan chan struct{}
@@ -150,6 +153,7 @@ func (h *packetHandlerMap) AddWithConnID(clientDestConnID, newConnID protocol.Co
 func (h *packetHandlerMap) Remove(id protocol.ConnectionID) {
 	h.mutex.Lock()
 	delete(h.handlers, id)
+	h.recreatehMapIfNeeded()
 	h.mutex.Unlock()
 	h.logger.Debugf("Removing connection ID %s.", id)
 }
@@ -159,6 +163,7 @@ func (h *packetHandlerMap) Retire(id protocol.ConnectionID) {
 	time.AfterFunc(h.deleteRetiredConnsAfter, func() {
 		h.mutex.Lock()
 		delete(h.handlers, id)
+		h.recreatehMapIfNeeded()
 		h.mutex.Unlock()
 		h.logger.Debugf("Removing connection ID %s after it has been retired.", id)
 	})
@@ -194,6 +199,7 @@ func (h *packetHandlerMap) ReplaceWithClosed(ids []protocol.ConnectionID, pers p
 		handler.shutdown()
 		for _, id := range ids {
 			delete(h.handlers, id)
+			h.recreatehMapIfNeeded()
 		}
 		h.mutex.Unlock()
 		h.logger.Debugf("Removing connection IDs %s for a closed connection after it has been retired.", ids)
@@ -209,6 +215,7 @@ func (h *packetHandlerMap) AddResetToken(token protocol.StatelessResetToken, han
 func (h *packetHandlerMap) RemoveResetToken(token protocol.StatelessResetToken) {
 	h.mutex.Lock()
 	delete(h.resetTokens, token)
+	h.recreatetMapIfNeeded()
 	h.mutex.Unlock()
 }
 
@@ -275,4 +282,34 @@ func (h *packetHandlerMap) GetStatelessResetToken(connID protocol.ConnectionID) 
 	h.statelessResetHasher.Reset()
 	h.statelessResetMutex.Unlock()
 	return token
+}
+
+func (h *packetHandlerMap) recreatehtMap() {
+	newMap := make(map[protocol.ConnectionID]packetHandler)
+	for key, val := range h.handlers {
+		newMap[key] = val
+	}
+	h.handlers = newMap
+}
+
+func (h *packetHandlerMap) recreatetMap() {
+	newMap := make(map[protocol.StatelessResetToken]packetHandler)
+	for key, val := range h.resetTokens {
+		newMap[key] = val
+	}
+	h.resetTokens = newMap
+}
+
+func (h *packetHandlerMap) recreatehMapIfNeeded() {
+	if atomic.AddInt32(&h.hmDeleteCount, 1) >= deleteTrigger {
+		h.recreatehtMap()
+		atomic.StoreInt32(&h.hmDeleteCount, 0)
+	}
+}
+
+func (h *packetHandlerMap) recreatetMapIfNeeded() {
+	if atomic.AddInt32(&h.rtDeleteCount, 1) >= deleteTrigger {
+		h.recreatetMap()
+		atomic.StoreInt32(&h.rtDeleteCount, 0)
+	}
 }

@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/internal/wire"
@@ -16,12 +17,14 @@ type outgoingStream interface {
 type outgoingStreamsMap[T outgoingStream] struct {
 	mutex sync.RWMutex
 
-	streamType protocol.StreamType
-	streams    map[protocol.StreamNum]T
+	streamType  protocol.StreamType
+	streams     map[protocol.StreamNum]T
+	deleteCount int32
 
 	openQueue      map[uint64]chan struct{}
 	lowestInQueue  uint64
 	highestInQueue uint64
+	oqDeleteCount  int32
 
 	nextStream  protocol.StreamNum // stream ID of the stream returned by OpenStream(Sync)
 	maxStream   protocol.StreamNum // the maximum stream ID we're allowed to open
@@ -96,6 +99,7 @@ func (m *outgoingStreamsMap[T]) OpenStreamSync(ctx context.Context) (T, error) {
 		case <-ctx.Done():
 			m.mutex.Lock()
 			delete(m.openQueue, queuePos)
+			m.handleOQDelete()
 			return *new(T), ctx.Err()
 		case <-waitChan:
 		}
@@ -110,6 +114,7 @@ func (m *outgoingStreamsMap[T]) OpenStreamSync(ctx context.Context) (T, error) {
 		}
 		str := m.openStream()
 		delete(m.openQueue, queuePos)
+		m.handleOQDelete()
 		m.lowestInQueue = queuePos + 1
 		m.unblockOpenSync()
 		return str, nil
@@ -166,6 +171,13 @@ func (m *outgoingStreamsMap[T]) DeleteStream(num protocol.StreamNum) error {
 		}
 	}
 	delete(m.streams, num)
+
+	currDel := atomic.AddInt32(&m.deleteCount, 1)
+	if currDel >= deleteTrigger {
+		m.recreateMap()
+		atomic.StoreInt32(&m.deleteCount, 0)
+	}
+
 	return nil
 }
 
@@ -227,4 +239,28 @@ func (m *outgoingStreamsMap[T]) CloseWithError(err error) {
 		}
 	}
 	m.mutex.Unlock()
+}
+
+func (m *outgoingStreamsMap[T]) recreateMap() {
+	newMap := make(map[protocol.StreamNum]T)
+	for key, val := range m.streams {
+		newMap[key] = val
+	}
+	m.streams = newMap
+}
+
+func (m *outgoingStreamsMap[T]) recreateOpenQueueMap() {
+	newMap := make(map[uint64]chan struct{})
+	for key, val := range m.openQueue {
+		newMap[key] = val
+	}
+	m.openQueue = newMap
+}
+
+func (m *outgoingStreamsMap[T]) handleOQDelete() {
+	currDel := atomic.AddInt32(&m.oqDeleteCount, 1)
+	if currDel >= deleteTrigger {
+		m.recreateOpenQueueMap()
+		atomic.StoreInt32(&m.oqDeleteCount, 0)
+	}
 }

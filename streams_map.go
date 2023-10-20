@@ -13,6 +13,8 @@ import (
 	"github.com/sagernet/quic-go/internal/wire"
 )
 
+const deleteTrigger = 1 << 15
+
 type streamError struct {
 	message string
 	nums    []protocol.StreamNum

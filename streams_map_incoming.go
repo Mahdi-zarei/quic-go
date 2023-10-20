@@ -3,6 +3,7 @@ package quic
 import (
 	"context"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/quic-go/internal/protocol"
 	"github.com/sagernet/quic-go/internal/wire"
@@ -23,8 +24,9 @@ type incomingStreamsMap[T incomingStream] struct {
 	mutex         sync.RWMutex
 	newStreamChan chan struct{}
 
-	streamType protocol.StreamType
-	streams    map[protocol.StreamNum]incomingStreamEntry[T]
+	streamType  protocol.StreamType
+	streams     map[protocol.StreamNum]incomingStreamEntry[T]
+	deleteCount int32
 
 	nextStreamToAccept protocol.StreamNum // the next stream that will be returned by AcceptStream()
 	nextStreamToOpen   protocol.StreamNum // the highest stream that the peer opened
@@ -169,6 +171,13 @@ func (m *incomingStreamsMap[T]) deleteStream(num protocol.StreamNum) error {
 	}
 
 	delete(m.streams, num)
+
+	currDel := atomic.AddInt32(&m.deleteCount, 1)
+	if currDel >= deleteTrigger {
+		m.recreateMap()
+		atomic.StoreInt32(&m.deleteCount, 0)
+	}
+
 	// queue a MAX_STREAM_ID frame, giving the peer the option to open a new stream
 	if m.maxNumStreams > uint64(len(m.streams)) {
 		maxStream := m.nextStreamToOpen + protocol.StreamNum(m.maxNumStreams-uint64(len(m.streams))) - 1
@@ -192,4 +201,12 @@ func (m *incomingStreamsMap[T]) CloseWithError(err error) {
 	}
 	m.mutex.Unlock()
 	close(m.newStreamChan)
+}
+
+func (m *incomingStreamsMap[T]) recreateMap() {
+	newMap := make(map[protocol.StreamNum]incomingStreamEntry[T])
+	for key, val := range m.streams {
+		newMap[key] = val
+	}
+	m.streams = newMap
 }

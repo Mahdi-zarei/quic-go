@@ -3,6 +3,7 @@ package quic
 import (
 	"errors"
 	"sync"
+	"sync/atomic"
 
 	"github.com/sagernet/quic-go/internal/ackhandler"
 	"github.com/sagernet/quic-go/internal/protocol"
@@ -29,6 +30,7 @@ type framerI struct {
 	streamGetter streamGetter
 
 	activeStreams map[protocol.StreamID]struct{}
+	deleteCount   int32
 	streamQueue   ringbuffer.RingBuffer[protocol.StreamID]
 
 	controlFrameMutex sync.Mutex
@@ -106,6 +108,7 @@ func (f *framerI) AppendStreamFrames(frames []ackhandler.StreamFrame, maxLen pro
 		// The stream can be nil if it completed after it said it had data.
 		if str == nil || err != nil {
 			delete(f.activeStreams, id)
+			f.recreateMapIfNeeded()
 			continue
 		}
 		remainingLen := maxLen - length
@@ -118,6 +121,7 @@ func (f *framerI) AppendStreamFrames(frames []ackhandler.StreamFrame, maxLen pro
 			f.streamQueue.PushBack(id)
 		} else { // no more data to send. Stream is not active
 			delete(f.activeStreams, id)
+			f.recreateMapIfNeeded()
 		}
 		// The frame can be "nil"
 		// * if the receiveStream was canceled after it said it had data
@@ -146,6 +150,7 @@ func (f *framerI) Handle0RTTRejection() error {
 	f.streamQueue.Clear()
 	for id := range f.activeStreams {
 		delete(f.activeStreams, id)
+		f.recreateMapIfNeeded()
 	}
 	var j int
 	for i, frame := range f.controlFrames {
@@ -162,4 +167,21 @@ func (f *framerI) Handle0RTTRejection() error {
 	f.controlFrames = f.controlFrames[:j]
 	f.controlFrameMutex.Unlock()
 	return nil
+}
+
+func (f *framerI) recreateMap() {
+	newMap := make(map[protocol.StreamID]struct{})
+	for key, val := range f.activeStreams {
+		newMap[key] = val
+	}
+	f.activeStreams = newMap
+}
+
+func (f *framerI) recreateMapIfNeeded() {
+	currDel := atomic.AddInt32(&f.deleteCount, 1)
+
+	if currDel >= deleteTrigger {
+		f.recreateMap()
+		atomic.StoreInt32(&f.deleteCount, 0)
+	}
 }
