@@ -602,7 +602,7 @@ func (s *Server) handleRequest(conn *connection, str quic.Stream, datagrams *dat
 			)
 		}
 	}
-	fp := &frameParser{conn: conn, r: str, unknownFrameHandler: ufh}
+	fp := &frameParser{conn: conn, r: NewSteamWithDeadline(str, StreamTimeout), unknownFrameHandler: ufh}
 	frame, err := fp.ParseNext()
 	if err != nil {
 		if !errors.Is(err, errHijacked) {
